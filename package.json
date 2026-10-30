@@ -11,6 +11,7 @@
     "@distube/ytdl-core": "^5.2.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "express": "^4.19.2",
+    "undici": "^8.12.3",
     "yt-search": "^2.10.1"
   },
   "scripts": {

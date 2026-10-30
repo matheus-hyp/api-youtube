@@ -1,9 +1,11 @@
+// A ordem importa: env.js popula process.env (YOUTUBE_COOKIE, PORT) antes dos módulos que o leem.
+import "./src/env.js";
 import express from "express";
 import { existsSync } from "node:fs";
 import { readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { parseVideoId } from "@distube/ytdl-core";
-import { mp3, rawAudio, mp4, rawMp4, getInfo, getFormats, buscar } from "./src/youtube.js";
+import { mp3, rawAudio, mp4, rawMp4, getInfo, getFormats, buscar, fetchYT } from "./src/youtube.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -41,60 +43,72 @@ function validateUrl(req, res, next) {
     next();
 }
 
+// Remove do texto de erro qualquer menção à origem (domínios, nomes de serviço).
+function limparErro(msg) {
+    return String(msg || "erro ao processar requisição")
+        .replace(/https?:\/\/[^\s"'`]+/gi, (m) =>
+            /youtube|youtu\.be|ytimg|googlevideo/i.test(m) ? "[link removido]" : m
+        )
+        .replace(/you\s?tube|ytimg|googlevideo|innertube/gi, "o serviço")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+}
+
 // Envolve os handlers: erro vira JSON em vez de deixar a requisição pendurada.
 const h = (fn) => async (req, res) => {
     try {
         await fn(req, res);
     } catch (e) {
         console.log("erro na rota:", e.message);
-        if (!res.headersSent) res.json({ success: false, error: "erro ao processar requisição" });
+        if (!res.headersSent) res.json({ success: false, error: limparErro(e.message) });
     }
 };
 
-const data = (req) => ({ url: req.query.url, itag: req.query.itag });
+const data = (req) => ({ url: req.query.url, itag: req.query.itag, base: base(req) });
 
 app.get("/", (req, res) =>
     res.json({
         success: true,
-        name: "api-ytdl",
+        name: "api",
         endpoints: {
-            "/audio?url=&itag=": "mp3 a partir de uma URL do YouTube",
-            "/video?url=&itag=": "mp4 com áudio a partir de uma URL do YouTube",
+            "/audio?url=&itag=": "mp3 a partir de uma URL ou ID do vídeo",
+            "/video?url=&itag=": "mp4 com áudio a partir de uma URL ou ID do vídeo",
             "/raw-audio?url=&itag=": "áudio cru no formato original",
             "/raw-video?url=&itag=": "vídeo cru (sem áudio)",
+            "/thumb?id=&size=": "capa do vídeo (mq, hq, max; padrão hq)",
             "/info?url=": "detalhes e itags disponíveis",
             "/formats?url=": "todos os formatos do vídeo",
-            "/buscar?text=": "busca vídeos no YouTube",
+            "/buscar?text=": "busca vídeos",
         },
     })
 );
 
 app.get("/audio", validateUrl, h(async (req, res) => {
-    const arquivo = await mp3(data(req));
-    if (!arquivo) return res.json({ success: false, error: "erro ao baixar arquivo" });
-    res.json({ success: true, file: `${base(req)}/arquivo/?arquivo=${arquivo}` });
+    const r = await mp3(data(req));
+    if (!r?.file) return res.json({ success: false, error: "erro ao baixar arquivo" });
+    res.json({ success: true, ...r, file: `${base(req)}/arquivo/?arquivo=${r.file}` });
 }));
 
 app.get("/video", validateUrl, h(async (req, res) => {
-    const arquivo = await mp4(data(req));
-    if (!arquivo) return res.json({ success: false, error: "erro ao baixar arquivo" });
-    res.json({ success: true, file: `${base(req)}/arquivo/?arquivo=${arquivo}` });
+    const r = await mp4(data(req));
+    if (!r?.file) return res.json({ success: false, error: "erro ao baixar arquivo" });
+    res.json({ success: true, ...r, file: `${base(req)}/arquivo/?arquivo=${r.file}` });
 }));
 
 app.get("/raw-video", validateUrl, h(async (req, res) => {
-    const arquivo = await rawMp4(data(req));
-    if (!arquivo) return res.json({ success: false, error: "erro ao baixar arquivo" });
-    res.json({ success: true, file: `${base(req)}/arquivo/?arquivo=${arquivo}` });
+    const r = await rawMp4(data(req));
+    if (!r?.file) return res.json({ success: false, error: "erro ao baixar arquivo" });
+    res.json({ success: true, ...r, file: `${base(req)}/arquivo/?arquivo=${r.file}` });
 }));
 
 app.get("/raw-audio", validateUrl, h(async (req, res) => {
-    const arquivo = await rawAudio(data(req));
-    if (!arquivo) return res.json({ success: false, error: "erro ao baixar arquivo" });
-    res.json({ success: true, file: `${base(req)}/arquivo/?arquivo=${arquivo}` });
+    const r = await rawAudio(data(req));
+    if (!r?.file) return res.json({ success: false, error: "erro ao baixar arquivo" });
+    res.json({ success: true, ...r, file: `${base(req)}/arquivo/?arquivo=${r.file}` });
 }));
 
 app.get("/info", validateUrl, h(async (req, res) => {
-    const data = await getInfo({ url: req.query.url });
+    const data = await getInfo({ url: req.query.url, base: base(req) });
     if (!data) return res.json({ success: false, error: "erro ao buscar dados" });
     res.json({ success: true, ...data });
 }));
@@ -108,8 +122,40 @@ app.get("/formats", validateUrl, h(async (req, res) => {
 app.get("/buscar", h(async (req, res) => {
     if (!req.query.text?.length)
         return res.json({ success: false, error: "termo ou frase de busca não fornecido" });
-    const data = await buscar(req.query.text);
+    const data = await buscar(req.query.text, base(req));
     res.json({ success: true, data });
+}));
+
+// Capa do vídeo servida pelo próprio domínio da API — o navegador nunca vê o CDN da origem.
+const TAMANHOS = { mq: "mqdefault", hq: "hqdefault", sd: "sddefault", max: "maxresdefault", default: "default" };
+const thumbCache = new Map(); // id -> { buf, type, exp }
+const THUMB_TTL = 6 * 60 * 60 * 1000;
+
+app.get("/thumb", h(async (req, res) => {
+    const id = String(req.query.id || "");
+    if (!/^[A-Za-z0-9_-]{11}$/.test(id))
+        return res.json({ success: false, error: "id inválido" });
+
+    const cache = thumbCache.get(id);
+    if (cache && cache.exp > Date.now()) {
+        res.set("Content-Type", cache.type).set("Cache-Control", "public, max-age=3600");
+        return res.send(cache.buf);
+    }
+
+    const nome = TAMANHOS[String(req.query.size || "hq")] || TAMANHOS.hq;
+    let r = await fetchYT(`https://i.ytimg.com/vi/${id}/${nome}.jpg`);
+    // maxresdefault não existe em vídeos antigos: cai para a capa padrão.
+    if (!r.ok) r = await fetchYT(`https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+    if (!r.ok) return res.status(404).json({ success: false, error: "capa não encontrada" });
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    const type = r.headers.get("content-type") || "image/jpeg";
+
+    if (thumbCache.size >= 300) thumbCache.delete(thumbCache.keys().next().value);
+    thumbCache.set(id, { buf, type, exp: Date.now() + THUMB_TTL });
+
+    res.set("Content-Type", type).set("Cache-Control", "public, max-age=3600");
+    res.send(buf);
 }));
 
 app.get("/arquivo", (req, res) => {

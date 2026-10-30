@@ -1,13 +1,66 @@
+// Garante que .env/YOUTUBE_COOKIE/YOUTUBE_PROXY estejam carregados mesmo com import direto.
+import "./env.js";
 import { Ytdl } from "@distube/ytdl-core";
+import { ProxyAgent } from "undici";
 import yts from "yt-search";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { unlink, rename } from "node:fs/promises";
+import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { path as ffmpegPath } from "@ffmpeg-installer/ffmpeg";
 
 // Uma única sessão compartilhada: visitor data e resolução de player reutilizados em todas as requisições.
-export const ytdl = new Ytdl();
+//
+// Em servidores em nuvem o IP é de datacenter e o YouTube exige login ("Sign in to confirm
+// you're not a bot"). Duas formas de contornar, usáveis isoladas ou juntas:
+//
+//   YOUTUBE_COOKIE — cookies de uma sessão logada no YouTube (faz o YouTube confiar na sessão);
+//   YOUTUBE_PROXY  — proxy HTTP(S) com túnel TCP CONNECT (faz o YouTube ver outro IP).
+//
+// Nunca faça commit desses valores.
+const cookie = process.env.YOUTUBE_COOKIE?.trim();
+const proxyUrl = (
+    process.env.YOUTUBE_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    ""
+).trim();
+
+const options = {};
+if (cookie) options.cookie = cookie;
+
+let proxyAgent = null;
+let proxyHost = null;
+if (proxyUrl) {
+    try {
+        proxyHost = new URL(proxyUrl).host;
+        proxyAgent = new ProxyAgent(proxyUrl);
+        // O fetch do Node (undici) aceita `dispatcher`; assim TODAS as requisições do
+        // ytdl — player, formatos e download — saem pelo túnel CONNECT do proxy.
+        options.fetch = (input, init) => fetch(input, { ...init, dispatcher: proxyAgent });
+    } catch (e) {
+        throw new Error(`YOUTUBE_PROXY inválido ("${proxyUrl}"): ${e.message}`);
+    }
+}
+
+export const ytdl = new Ytdl(options);
+
+// fetch que respeita o proxy configurado — usado para buscar a capa via /thumb.
+export function fetchYT(input, init) {
+    return proxyAgent ? fetch(input, { ...init, dispatcher: proxyAgent }) : fetch(input, init);
+}
+
+if (cookie && proxyHost) {
+    console.log(`🍪 YOUTUBE_COOKIE ativo + 🔀 proxy ${proxyHost}`);
+} else if (cookie) {
+    console.log("🍪 YOUTUBE_COOKIE ativo — usando sessão autenticada");
+} else if (proxyHost) {
+    console.log(`🔀 YOUTUBE_PROXY ativo — YouTube acessado via ${proxyHost}`);
+} else {
+    console.log(
+        "⚠️ sem YOUTUBE_COOKIE e sem YOUTUBE_PROXY — em servidores em nuvem o YouTube pode bloquear com 'not a bot'"
+    );
+}
 
 const PUBLICO = join(import.meta.dirname, "..", "publico");
 
@@ -68,64 +121,79 @@ function runFfmpeg(args) {
     });
 }
 
+// Links que revelariam a origem (domínios da fonte) — removidos de qualquer texto de retorno.
+const LINK_ORIGEM = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be|ytimg\.com|ggpht\.com|googlevideo\.com)[^\s"']*/gi;
+function limparTexto(s) {
+    return typeof s === "string" ? s.replace(LINK_ORIGEM, "").trim() : s;
+}
+
+// Dados do vídeo para o cliente — nome, capa, duração etc. — sem expor a origem:
+// a capa aponta para o /thumb desta própria API (nunca para o CDN da fonte).
+function meta(info, base) {
+    const d = info.videoDetails;
+    return {
+        title: d.title,
+        id: d.id,
+        thumb: `${base ?? ""}/thumb/?id=${d.id}`,
+        duration: d.lengthSeconds,
+        views: d.viewCount,
+        channel: d.author?.name,
+    };
+}
+
 // Áudio convertido para mp3: um getInfo, um download, uma conversão.
 export async function mp3(data) {
     if (!data?.url) return;
-    try {
-        const info = await ytdl.getInfo(data.url);
-        const id = info.videoDetails.id;
-        const audio = pickAudio(info.formats, data.itag);
-        if (!audio) return;
+    const info = await ytdl.getInfo(data.url);
+    const id = info.videoDetails.id;
+    const audio = pickAudio(info.formats, data.itag);
+    if (!audio) throw new Error("nenhum formato de áudio disponível");
 
-        const tmp = join(PUBLICO, `tmp_${id}_${audio.itag}.${audio.container}`);
-        const out = `audio_${id}.mp3`;
+    const tmp = join(PUBLICO, `tmp_${id}_${audio.itag}.${audio.container}`);
+    const out = `audio_${id}.mp3`;
+    try {
         await downloadTo(info, { format: audio }, tmp);
         await runFfmpeg(["-i", tmp, "-vn", "-codec:a", "libmp3lame", "-q:a", "2", join(PUBLICO, out)]);
+    } finally {
         await unlink(tmp).catch(() => {});
-        return out;
-    } catch (e) {
-        console.log("erro mp3:", e.message);
     }
+    return { file: out, ...meta(info, data.base) };
 }
 
 // Áudio cru no formato original, sem conversão.
 export async function rawAudio(data) {
     if (!data?.url) return;
-    try {
-        const info = await ytdl.getInfo(data.url);
-        const id = info.videoDetails.id;
-        const audio = pickAudio(info.formats, data.itag);
-        if (!audio) return;
+    const info = await ytdl.getInfo(data.url);
+    const id = info.videoDetails.id;
+    const audio = pickAudio(info.formats, data.itag);
+    if (!audio) throw new Error("nenhum formato de áudio disponível");
 
-        const out = `audio_${id}.${audio.container}`;
-        await downloadTo(info, { format: audio }, join(PUBLICO, out));
-        return out;
-    } catch (e) {
-        console.log("erro rawAudio:", e.message);
-    }
+    const out = `audio_${id}.${audio.container}`;
+    await downloadTo(info, { format: audio }, join(PUBLICO, out));
+    return { file: out, ...meta(info, data.base) };
 }
 
 // Vídeo: se o formato já tem áudio, só baixa. Senão, baixa vídeo + m4a em paralelo e une com -c copy.
 export async function mp4(data) {
     if (!data?.url) return;
+    const info = await ytdl.getInfo(data.url);
+    const id = info.videoDetails.id;
+    const video = pickVideo(info.formats, data.itag);
+    if (!video) throw new Error("nenhum formato de vídeo disponível");
+
+    const out = `video_${id}.mp4`;
+    const dest = join(PUBLICO, out);
+
+    if (video.hasAudio) {
+        await downloadTo(info, { format: video }, dest);
+        return { file: out, ...meta(info, data.base) };
+    }
+
+    const audio = pickAudio(info.formats);
+    const vTmp = join(PUBLICO, `tmp_${id}_v${video.itag}.mp4`);
+    const aTmp = join(PUBLICO, `tmp_${id}_a${audio.itag}.${audio.container}`);
+
     try {
-        const info = await ytdl.getInfo(data.url);
-        const id = info.videoDetails.id;
-        const video = pickVideo(info.formats, data.itag);
-        if (!video) return;
-
-        const out = `video_${id}.mp4`;
-        const dest = join(PUBLICO, out);
-
-        if (video.hasAudio) {
-            await downloadTo(info, { format: video }, dest);
-            return out;
-        }
-
-        const audio = pickAudio(info.formats);
-        const vTmp = join(PUBLICO, `tmp_${id}_v${video.itag}.mp4`);
-        const aTmp = join(PUBLICO, `tmp_${id}_a${audio.itag}.${audio.container}`);
-
         await Promise.all([
             downloadTo(info, { format: video }, vTmp),
             downloadTo(info, { format: audio }, aTmp),
@@ -137,28 +205,23 @@ export async function mp4(data) {
         args.push(dest);
 
         await runFfmpeg(args);
+    } finally {
         await Promise.all([unlink(vTmp).catch(() => {}), unlink(aTmp).catch(() => {})]);
-        return out;
-    } catch (e) {
-        console.log("erro mp4:", e.message);
     }
+    return { file: out, ...meta(info, data.base) };
 }
 
-// Vídeo cru (sem áudio), como o YouTube o serve.
+// Vídeo cru (sem áudio), como a fonte o serve.
 export async function rawMp4(data) {
     if (!data?.url) return;
-    try {
-        const info = await ytdl.getInfo(data.url);
-        const id = info.videoDetails.id;
-        const video = pickVideo(info.formats, data.itag);
-        if (!video) return;
+    const info = await ytdl.getInfo(data.url);
+    const id = info.videoDetails.id;
+    const video = pickVideo(info.formats, data.itag);
+    if (!video) throw new Error("nenhum formato de vídeo disponível");
 
-        const out = `video_${id}.${video.container}`;
-        await downloadTo(info, { format: video }, join(PUBLICO, out));
-        return out;
-    } catch (e) {
-        console.log("erro rawMp4:", e.message);
-    }
+    const out = `video_${id}.${video.container}`;
+    await downloadTo(info, { format: video }, join(PUBLICO, out));
+    return { file: out, ...meta(info, data.base) };
 }
 
 export async function getInfo(data) {
@@ -170,27 +233,57 @@ export async function getInfo(data) {
         audio: getItag(info.formats, "audio"),
         title: details.title,
         videoid: details.id,
-        thumb: details.thumbnails.at(-1)?.url,
+        thumb: `${data.base ?? ""}/thumb/?id=${details.id}`,
         duration: details.lengthSeconds,
         views: details.viewCount,
-        videoDetails: details,
+        channel: details.author?.name,
+        // Subconjunto sanitizado: sem URLs, sem canais, sem referências à origem.
+        videoDetails: {
+            id: details.id,
+            title: limparTexto(details.title),
+            description: limparTexto(details.description),
+            lengthSeconds: details.lengthSeconds,
+            viewCount: details.viewCount,
+            likes: details.likes,
+            publishDate: details.publishDate,
+            uploadDate: details.uploadDate,
+            category: details.category,
+            isLive: details.isLive,
+            author: { name: details.author?.name },
+        },
     };
 }
 
 export async function getFormats(data) {
     if (!data?.url) return;
     const info = await ytdl.getInfo(data.url);
-    return info.formats;
+    // Sem `url`/`client`: o campo url aponta para o CDN da origem e seria uma exposição.
+    return info.formats.map((f) => ({
+        itag: f.itag,
+        container: f.container,
+        mimeType: f.mimeType,
+        codecs: f.codecs,
+        qualityLabel: f.qualityLabel,
+        audioQuality: f.audioQuality,
+        audioBitrate: f.audioBitrate,
+        hasAudio: f.hasAudio,
+        hasVideo: f.hasVideo,
+        width: f.width,
+        height: f.height,
+        fps: f.fps,
+        contentLength: f.contentLength,
+    }));
 }
 
-export async function buscar(search) {
+export async function buscar(search, base) {
     if (!search) return "sem busca";
     const { videos } = await yts(search);
     return videos.slice(0, 5).map((v) => ({
-        title: v.title,
+        title: limparTexto(v.title),
         id: v.videoId,
-        url: v.url,
-        thumb: v.thumbnail,
+        // Passe este valor em ?url= — a API aceita o ID puro.
+        url: v.videoId,
+        thumb: `${base ?? ""}/thumb/?id=${v.videoId}`,
         views: v.views,
         duration: { seconds: v.duration.seconds, time: v.duration.timestamp },
     }));
