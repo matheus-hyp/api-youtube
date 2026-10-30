@@ -79,8 +79,16 @@ app.get("/", (req, res) =>
             "/info?url=": "detalhes e itags disponíveis",
             "/formats?url=": "todos os formatos do vídeo",
             "/buscar?text=": "busca vídeos",
+            "/url-download-allow": "lista de domínios liberados para download",
         },
     })
+);
+
+// Domínios liberados para download — lista fixa.
+const URL_DOWNLOAD_ALLOW = ["youtube.com", "m.youtube.com"];
+
+app.get("/url-download-allow", (req, res) =>
+    res.json({ success: true, data: URL_DOWNLOAD_ALLOW })
 );
 
 app.get("/audio", validateUrl, h(async (req, res) => {
