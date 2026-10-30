@@ -1,0 +1,23 @@
+# Dependências
+node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Downloads gerados pela API
+publico/*
+!publico/.vazio
+
+# Ambiente
+.env
+.env.*
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/
+.idea/
