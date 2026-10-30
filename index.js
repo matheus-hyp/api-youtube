@@ -85,10 +85,10 @@ app.get("/", (req, res) =>
 );
 
 // Domínios liberados para download — lista fixa.
-// `pattern` informa o padrão de URL que deve ser enviada; `example` mostra um caso.
+// `pattern` informa o padrão de URL que deve ser enviada.
 const URL_DOWNLOAD_ALLOW = [
-    { url: "youtube.com", pattern: "/watch*", example: "https://youtube.com/watch?v=VIDEO_ID" },
-    { url: "m.youtube.com", pattern: "/watch*", example: "https://m.youtube.com/watch?v=VIDEO_ID" },
+    { url: "youtube.com", pattern: "/watch*" },
+    { url: "m.youtube.com", pattern: "/watch*" },
 ];
 
 app.get("/url-download-allow", (req, res) =>
