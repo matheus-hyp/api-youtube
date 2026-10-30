@@ -71,11 +71,11 @@ Sucesso na geração de um arquivo (com os dados do vídeo):
     "success": true,
     "file": "http://localhost:3000/arquivo/?arquivo=audio_dQw4w9WgXcQ.mp3",
     "title": "Rick Astley - Never Gonna Give You Up (Official Video)",
-    "id": "dQw4w9WgXcQ",
+    "guid": "dQw4w9WgXcQ",
     "thumb": "http://localhost:3000/thumb/?id=dQw4w9WgXcQ",
     "duration": 214,
-    "views": 1832044809,
-    "channel": "Rick Astley"
+    "loops": 1832044809,
+    "provedor": "Rick Astley"
 }
 ```
 

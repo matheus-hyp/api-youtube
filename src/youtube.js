@@ -133,11 +133,11 @@ function meta(info, base) {
     const d = info.videoDetails;
     return {
         title: d.title,
-        id: d.id,
+        guid: d.id,
         thumb: `${base ?? ""}/thumb/?id=${d.id}`,
         duration: d.lengthSeconds,
-        views: d.viewCount,
-        channel: d.author?.name,
+        loops: d.viewCount,
+        provedor: d.author?.name,
     };
 }
 
@@ -232,14 +232,14 @@ export async function getInfo(data) {
         video: getItag(info.formats),
         audio: getItag(info.formats, "audio"),
         title: details.title,
-        videoid: details.id,
+        guid: details.id,
         thumb: `${data.base ?? ""}/thumb/?id=${details.id}`,
         duration: details.lengthSeconds,
-        views: details.viewCount,
-        channel: details.author?.name,
+        loops: details.viewCount,
+        provedor: details.author?.name,
         // Subconjunto sanitizado: sem URLs, sem canais, sem referências à origem.
         videoDetails: {
-            id: details.id,
+            guid: details.id,
             title: limparTexto(details.title),
             description: limparTexto(details.description),
             lengthSeconds: details.lengthSeconds,
@@ -280,11 +280,11 @@ export async function buscar(search, base) {
     const { videos } = await yts(search);
     return videos.slice(0, 5).map((v) => ({
         title: limparTexto(v.title),
-        id: v.videoId,
+        guid: v.videoId,
         // Passe este valor em ?url= — a API aceita o ID puro.
         url: v.videoId,
         thumb: `${base ?? ""}/thumb/?id=${v.videoId}`,
-        views: v.views,
+        loops: v.views,
         duration: { seconds: v.duration.seconds, time: v.duration.timestamp },
     }));
 }
