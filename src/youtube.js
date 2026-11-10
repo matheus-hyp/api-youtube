@@ -64,6 +64,28 @@ if (cookie && proxyHost) {
 
 const PUBLICO = join(import.meta.dirname, "..", "publico");
 
+// Bloqueio transitório de IP do YouTube ("Sign in to confirm you're not a bot") — como ele
+// liga e desliga sozinho, tentamos de novo antes de devolver o erro ao cliente.
+const BLOQUEIO = /not a bot|confirm you/i;
+const dorme = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Executa `fn`; se o erro for o bloqueio "not a bot", repete até 3 vezes com 4s de intervalo.
+// Outros erros (URL inválida, vídeo indisponível...) continuam subindo na hora.
+export async function comRetry(fn, tentativas = 3, intervaloMs = 4000) {
+    for (let i = 0; i < tentativas; i++) {
+        try {
+            return await fn();
+        } catch (e) {
+            if (!BLOQUEIO.test(e.message) || i === tentativas - 1) throw e;
+            console.log(`⏳ bloqueio "not a bot" — tentativa ${i + 2}/${tentativas} em ${intervaloMs / 1000}s`);
+            await dorme(intervaloMs);
+        }
+    }
+}
+
+// Ponto único de acesso ao player: é aqui que o bloqueio costuma aparecer.
+const pegarInfo = (url) => comRetry(() => ytdl.getInfo(url));
+
 // `itag` chega da query string como texto; a v5 espera número.
 function toQuality(value) {
     if (value === undefined || value === null || value === "") return undefined;
@@ -144,7 +166,7 @@ function meta(info, base) {
 // Áudio convertido para mp3: um getInfo, um download, uma conversão.
 export async function mp3(data) {
     if (!data?.url) return;
-    const info = await ytdl.getInfo(data.url);
+    const info = await pegarInfo(data.url);
     const id = info.videoDetails.id;
     const audio = pickAudio(info.formats, data.itag);
     if (!audio) throw new Error("nenhum formato de áudio disponível");
@@ -163,7 +185,7 @@ export async function mp3(data) {
 // Áudio cru no formato original, sem conversão.
 export async function rawAudio(data) {
     if (!data?.url) return;
-    const info = await ytdl.getInfo(data.url);
+    const info = await pegarInfo(data.url);
     const id = info.videoDetails.id;
     const audio = pickAudio(info.formats, data.itag);
     if (!audio) throw new Error("nenhum formato de áudio disponível");
@@ -176,7 +198,7 @@ export async function rawAudio(data) {
 // Vídeo: se o formato já tem áudio, só baixa. Senão, baixa vídeo + m4a em paralelo e une com -c copy.
 export async function mp4(data) {
     if (!data?.url) return;
-    const info = await ytdl.getInfo(data.url);
+    const info = await pegarInfo(data.url);
     const id = info.videoDetails.id;
     const video = pickVideo(info.formats, data.itag);
     if (!video) throw new Error("nenhum formato de vídeo disponível");
@@ -214,7 +236,7 @@ export async function mp4(data) {
 // Vídeo cru (sem áudio), como a fonte o serve.
 export async function rawMp4(data) {
     if (!data?.url) return;
-    const info = await ytdl.getInfo(data.url);
+    const info = await pegarInfo(data.url);
     const id = info.videoDetails.id;
     const video = pickVideo(info.formats, data.itag);
     if (!video) throw new Error("nenhum formato de vídeo disponível");
@@ -226,7 +248,7 @@ export async function rawMp4(data) {
 
 export async function getInfo(data) {
     if (!data?.url) return;
-    const info = await ytdl.getInfo(data.url);
+    const info = await pegarInfo(data.url);
     const details = info.videoDetails;
     return {
         video: getItag(info.formats),
@@ -256,7 +278,7 @@ export async function getInfo(data) {
 
 export async function getFormats(data) {
     if (!data?.url) return;
-    const info = await ytdl.getInfo(data.url);
+    const info = await pegarInfo(data.url);
     // Sem `url`/`client`: o campo url aponta para o CDN da origem e seria uma exposição.
     return info.formats.map((f) => ({
         itag: f.itag,
